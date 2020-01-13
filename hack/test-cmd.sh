@@ -13,7 +13,6 @@ source "${HYPER_ROOT}/hack/lib/init.sh"
 function cleanup()
 {
   stop_hyperd
-
   rm -rf "${HYPER_TEMP}"
 
   hyper::log::status "Clean up complete"
@@ -35,6 +34,20 @@ function check-curl-access-code()
   return 1
 }
 
+function start_vmlogd()
+{
+    hyper::log::status "Starting vmlogd"
+    sudo "${HYPER_OUTPUT_HOSTBIN}/vmlogd" 1>&2 &
+}
+
+function showvmlogs() {
+    if [ x"$SHOWVMLOGS" == xtrue ]; then
+      file=`sudo ls -dt /var/log/hyper/vm/* | head -1`
+      echo "logs for $file"
+      sudo cat $file
+    fi
+}
+
 function start_hyperd()
 {
   config="$1"
@@ -47,6 +60,7 @@ function start_hyperd()
   hyper::log::status "Starting hyperd"
   sudo "${HYPER_OUTPUT_HOSTBIN}/hyperd" \
     --host="tcp://127.0.0.1:${API_PORT}" \
+    --logtostderr \
     --v=3 \
     --config="${config}" 1>&2 &
   HYPERD_PID=$!
@@ -84,6 +98,10 @@ clear_emulator_capabilities = 0
 EOF
 ) | sudo tee /etc/libvirt/qemu.conf
     sudo /etc/init.d/libvirt-bin restart
+    [ ! -x /etc/init.d/virtlogd ] || sudo /etc/init.d/virtlogd restart
+    mount|grep cgroup || sudo mount -t tmpfs none /sys/fs/cgroup
+    [ -d /sys/fs/cgroup/cpu,cpuacct ] || sudo mkdir -p /sys/fs/cgroup/cpu,cpuacct
+    mount|grep cpuacct || sudo mount -t cgroup -o cpu,cpuacct none /sys/fs/cgroup/cpu,cpuacct || true
 }
 
 hyper::util::trap_add cleanup EXIT SIGINT
@@ -142,17 +160,17 @@ __EOF__
   # Image management   #
   ######################
 
-  hyper::test::check_image busybox || hyper::test::pull_image busybox
-  hyper::test::check_image busybox
+  hyper::test::check_image "hyperhq/busybox" || hyper::test::pull_image "hyperhq/busybox"
+  hyper::test::check_image "hyperhq/busybox"
 
-  hyper::test::remove_image busybox
-  ! hyper::test::check_image busybox
+  hyper::test::remove_image "hyperhq/busybox"
+  ! hyper::test::check_image "hyperhq/busybox"
 
-  hyper::test::pull_image busybox
-  hyper::test::check_image busybox
+  hyper::test::pull_image "hyperhq/busybox"
+  hyper::test::check_image "hyperhq/busybox"
 
-  hyper::test::pull_image "haproxy:1.4"
-  hyper::test::check_image "haproxy" "1.4"
+  hyper::test::pull_image "haproxy:1.5"
+  hyper::test::check_image "haproxy" "1.5"
 
   ########################
   # gRPC API integration #
@@ -171,25 +189,43 @@ __EOF__
   hyper::test::map_file
   hyper::test::with_volume
   hyper::test::service
+  hyper::test::nfs_volume
+  hyper::test::execvm
+  hyper::test::remove_container_with_volume
+  hyper::test::imageuser
+  hyper::test::imageusergroup
+  hyper::test::specuseroverride
+  hyper::test::imagevolume
+  hyper::test::force_kill_container
+  hyper::test::container_logs_no_newline
+  hyper::test::container_readonly_rootfs_and_volume
+  hyper::test::portmapping
 
   stop_hyperd
 }
 
-# devicemapper storage driver takes too much time to init
-hyper_storage_drivers=(
-  "aufs"
-)
+setup_btrfs() {
+  sudo mkdir /var/lib/hyper
+  sudo truncate /dev/shm/hyper-btrfs.img --size=4G
+  sudo mkfs.btrfs -f /dev/shm/hyper-btrfs.img
+  sudo mount -t btrfs -oloop /dev/shm/hyper-btrfs.img /var/lib/hyper
+}
 
-hyper_exec_drivers=(
-  ""
-  "qemu"
-  "libvirt"
-)
-for sdriver in "${hyper_storage_drivers[@]}"; do
-  for edriver in "${hyper_exec_drivers[@]}"; do
-    runTests "${edriver}" "${sdriver}"
-  done
-done
+# test only one combination if HYPER_EXEC_DRIVER and HYPER_STORATE_DRIVER are both set
+if (set -u; echo -e "HYPER_EXEC_DRIVER is $HYPER_EXEC_DRIVER\nHYPER_STORAGE_DRIVER is $HYPER_STORAGE_DRIVER") 2>/dev/null ; then
+  # qemu+rawblock: test with non-cow-rawblock, libvirt+rawblock: test with cow-enabled-rawblock
+  if [ x"$TRAVIS" == xtrue -a x"$HYPER_EXEC_DRIVER" == xlibvirt -a x"$HYPER_STORAGE_DRIVER" == xrawblock ]; then
+    setup_btrfs
+  elif [ x"$TRAVIS" == xtrue -a x"$HYPER_STORAGE_DRIVER" == xbtrfs ]; then
+    setup_btrfs
+  fi
+  runTests "$HYPER_EXEC_DRIVER" "$HYPER_STORAGE_DRIVER"
+else
+  runTests qemu overlay
+  runTests qemu rawblock
+  runTests libvirt overlay
+  runTests libvirt devicemapper
+fi
 
 hyper::test::clear_all
 hyper::log::status "TEST PASSED"

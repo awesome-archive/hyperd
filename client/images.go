@@ -9,13 +9,14 @@ import (
 
 	"github.com/docker/go-units"
 
+	"github.com/hyperhq/hyperd/utils"
 	gflag "github.com/jessevdk/go-flags"
 )
 
 func (cli *HyperClient) HyperCmdImages(args ...string) error {
 	var opts struct {
-		All   bool `short:"a" long:"all" default:"false" description:"Show all images (by default filter out the intermediate image layers)"`
-		Quiet bool `short:"q" long:"quiet" default:"false" description:"Only show numeric IDs"`
+		All   bool `short:"a" long:"all" description:"Show all images (by default filter out the intermediate image layers)"`
+		Quiet bool `short:"q" long:"quiet" description:"Only show numeric IDs"`
 	}
 	var parser = gflag.NewParser(&opts, gflag.Default)
 
@@ -43,13 +44,13 @@ func (cli *HyperClient) HyperCmdImages(args ...string) error {
 	if opts.Quiet == false {
 		fmt.Fprintln(w, "REPOSITORY\tTAG\tIMAGE ID\tCREATED\tVIRTUAL SIZE")
 		for _, item := range imagesList {
-			fields := strings.Split(item, ":")
+			fields := utils.RsplitN(item, ":", 5)
 			date, _ := strconv.ParseUint(fields[3], 0, 64)
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", fields[0], fields[1], fields[2][:12], time.Unix(int64(date), 0).Format("2006-01-02 15:04:05"), getImageSizeString(fields[4]))
 		}
 	} else {
 		for _, item := range imagesList {
-			fields := strings.Split(item, ":")
+			fields := utils.RsplitN(item, ":", 5)
 			fmt.Fprintf(w, "%s\n", fields[2][:12])
 		}
 	}

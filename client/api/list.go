@@ -31,6 +31,10 @@ func (cli *Client) GetContainerByPod(podId string) (string, error) {
 	containerResponse = remoteInfo.GetList("cData")
 	for _, c := range containerResponse {
 		fields := strings.Split(c, ":")
+		if len(fields) < 4 {
+			fmt.Printf("can not parse container string: %s", c)
+			continue
+		}
 		containerId := fields[0]
 		if podId == fields[2] {
 			return containerId, nil
@@ -40,12 +44,9 @@ func (cli *Client) GetContainerByPod(podId string) (string, error) {
 	return "", fmt.Errorf("Container not found")
 }
 
-func (cli *Client) List(item, pod, vm string, aux bool) (*engine.Env, error) {
+func (cli *Client) List(item, pod, vm string) (*engine.Env, error) {
 	v := url.Values{}
 	v.Set("item", item)
-	if aux {
-		v.Set("auxiliary", "yes")
-	}
 	if pod != "" {
 		v.Set("pod", pod)
 	}

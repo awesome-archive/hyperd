@@ -1,12 +1,15 @@
 package integration
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"time"
 
 	"github.com/hyperhq/hyperd/lib/promise"
 	"github.com/hyperhq/hyperd/types"
+
+	"github.com/docker/docker/pkg/stdcopy"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 )
@@ -72,10 +75,8 @@ func (c *HyperClient) GetVMList() ([]*types.VMListResult, error) {
 }
 
 // GetContainerList gets a list of containers
-func (c *HyperClient) GetContainerList(auxiliary bool) ([]*types.ContainerListResult, error) {
-	req := types.ContainerListRequest{
-		Auxiliary: auxiliary,
-	}
+func (c *HyperClient) GetContainerList() ([]*types.ContainerListResult, error) {
+	req := types.ContainerListRequest{}
 	containerList, err := c.client.ContainerList(
 		c.ctx,
 		&req,
@@ -140,12 +141,111 @@ func (c *HyperClient) GetContainerLogs(container string) ([]byte, error) {
 	return ret, nil
 }
 
+type StreamExtractor interface {
+	Extract(orig []byte) ([]byte, []byte, error)
+}
+
+type RawExtractor struct{}
+
+const (
+	// Stdin represents standard input stream type.
+	Stdin stdcopy.StdType = iota
+	// Stdout represents standard output stream type.
+	Stdout
+	// Stderr represents standard error steam type.
+	Stderr
+
+	stdWriterPrefixLen = 8
+	stdWriterFdIndex   = 0
+	stdWriterSizeIndex = 4
+)
+
+type StdcopyExtractor struct {
+	readingHead bool
+	current     stdcopy.StdType
+	remain      int
+
+	headbuf []byte
+	headlen int
+}
+
+func NewExtractor(tty bool) StreamExtractor {
+	if tty {
+		return &RawExtractor{}
+	}
+	return &StdcopyExtractor{
+		readingHead: true,
+		headbuf:     make([]byte, stdWriterPrefixLen),
+	}
+}
+
+func (r *RawExtractor) Extract(orig []byte) ([]byte, []byte, error) {
+	return orig, nil, nil
+}
+
+func (s *StdcopyExtractor) Extract(orig []byte) ([]byte, []byte, error) {
+	var (
+		stdout = []byte{}
+		stderr = []byte{}
+	)
+	for len(orig) > 0 {
+		if s.readingHead {
+			hrl := stdWriterPrefixLen - s.headlen //hrl -- head remain length
+			if len(orig) < hrl {
+				copy(s.headbuf[s.headlen:], orig)
+				s.headlen += len(orig)
+				return stdout, stderr, nil
+			}
+
+			copy(s.headbuf[s.headlen:], orig[:hrl])
+			orig = orig[hrl:]
+			s.headlen = 0
+
+			stype := stdcopy.StdType(s.headbuf[stdWriterFdIndex])
+			if stype != Stdout && stype != Stderr {
+				return stdout, stderr, fmt.Errorf("invalid stream type %x", stype)
+			}
+
+			s.current = stype
+			s.remain = int(binary.BigEndian.Uint32(s.headbuf[stdWriterSizeIndex : stdWriterSizeIndex+4]))
+			s.readingHead = false
+		}
+
+		var (
+			msg []byte
+			ml  int
+		)
+		if len(orig) < s.remain {
+			s.remain -= len(orig)
+			ml = len(orig)
+		} else {
+			ml = s.remain
+			s.readingHead = true
+			s.remain = 0
+		}
+
+		msg = orig[:ml]
+		orig = orig[ml:]
+
+		switch s.current {
+		case Stdout:
+			stdout = append(stdout, msg...)
+		case Stderr:
+			stderr = append(stderr, msg...)
+		}
+	}
+	return stdout, stderr, nil
+
+}
+
 // PostAttach attach to a container or pod by id
-func (c *HyperClient) PostAttach(id string) error {
+func (c *HyperClient) PostAttach(id string, tty bool) error {
 	stream, err := c.client.Attach(c.ctx)
 	if err != nil {
 		return err
 	}
+
+	extractor := NewExtractor(tty)
 
 	req := types.AttachMessage{
 		ContainerID: id,
@@ -165,7 +265,13 @@ func (c *HyperClient) PostAttach(id string) error {
 	if err != nil {
 		return err
 	}
-	if string(res.Data) != "Hello Hyper\n" {
+
+	out, _, err := extractor.Extract(res.Data)
+	if err != nil {
+		return err
+	}
+
+	if string(out) != "Hello Hyper\n" {
 		return fmt.Errorf("post attach response error\n")
 	}
 
@@ -184,39 +290,6 @@ func (c *HyperClient) GetImageList() ([]*types.ImageInfo, error) {
 	}
 
 	return imageList.ImageList, nil
-}
-
-// CreateVM creates a new VM
-func (c *HyperClient) CreateVM(cpu, memory int32) (string, error) {
-	req := types.VMCreateRequest{
-		Cpu:    cpu,
-		Memory: memory,
-	}
-	vm, err := c.client.VMCreate(
-		c.ctx,
-		&req,
-	)
-	if err != nil {
-		return "", err
-	}
-
-	return vm.VmID, nil
-}
-
-// RemoveVM removes a vm by id
-func (c *HyperClient) RemoveVM(vmID string) (*types.VMRemoveResponse, error) {
-	req := types.VMRemoveRequest{
-		VmID: vmID,
-	}
-	resp, err := c.client.VMRemove(
-		c.ctx,
-		&req,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return resp, nil
 }
 
 // CreatePod creates a pod
@@ -278,6 +351,21 @@ func (c *HyperClient) RemovePod(podID string) error {
 	return nil
 }
 
+// ContainerExecSignal sends signal to specified exec of specified container
+func (c *HyperClient) ContainerExecSignal(container, execID string, sig int64) error {
+	req := types.ExecSignalRequest{
+		ContainerID: container,
+		ExecID:      execID,
+		Signal:      sig,
+	}
+	_, err := c.client.ExecSignal(c.ctx, &req)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // ContainerExecCreate creates exec in a container
 func (c *HyperClient) ContainerExecCreate(container string, command []string, tty bool) (string, error) {
 	req := types.ExecCreateRequest{
@@ -294,7 +382,7 @@ func (c *HyperClient) ContainerExecCreate(container string, command []string, tt
 }
 
 // ContainerExecStart starts exec in a container with input stream in and output stream out
-func (c *HyperClient) ContainerExecStart(containerId, execId string, stdin io.ReadCloser, stdout, stderr io.Writer) error {
+func (c *HyperClient) ContainerExecStart(containerId, execId string, stdin io.ReadCloser, stdout, stderr io.Writer, tty bool) error {
 	request := types.ExecStartRequest{
 		ContainerID: containerId,
 		ExecID:      execId,
@@ -306,6 +394,7 @@ func (c *HyperClient) ContainerExecStart(containerId, execId string, stdin io.Re
 	if err := stream.Send(&request); err != nil {
 		return err
 	}
+	extractor := NewExtractor(tty)
 	var recvStdoutError chan error
 	if stdout != nil || stderr != nil {
 		recvStdoutError = promise.Go(func() (err error) {
@@ -315,12 +404,28 @@ func (c *HyperClient) ContainerExecStart(containerId, execId string, stdin io.Re
 					return err
 				}
 				if in != nil && in.Stdout != nil {
-					nw, ew := stdout.Write(in.Stdout)
-					if ew != nil {
-						return ew
+					so, se, ee := extractor.Extract(in.Stdout)
+					if ee != nil {
+						return ee
 					}
-					if nw != len(in.Stdout) {
-						return io.ErrShortWrite
+					if len(so) > 0 {
+						nw, ew := stdout.Write(so)
+						if ew != nil {
+							return ew
+						}
+						if nw != len(so) {
+							return io.ErrShortWrite
+						}
+					}
+					if len(se) > 0 {
+						nw, ew := stdout.Write(se)
+						if ew != nil {
+							return ew
+						}
+						if nw != len(se) {
+							return io.ErrShortWrite
+						}
+
 					}
 				}
 				if err == io.EOF {
@@ -361,36 +466,13 @@ func (c *HyperClient) ContainerExecStart(containerId, execId string, stdin io.Re
 }
 
 // StartPod starts a pod by podID
-func (c *HyperClient) StartPod(podID, vmID string, attach bool) error {
-	stream, err := c.client.PodStart(context.Background())
+func (c *HyperClient) StartPod(podID string) error {
+	req := &types.PodStartRequest{
+		PodID: podID,
+	}
+
+	_, err := c.client.PodStart(c.ctx, req)
 	if err != nil {
-		return err
-	}
-
-	req := types.PodStartMessage{
-		PodID:  podID,
-		VmID:   vmID,
-		Attach: attach,
-	}
-	if err := stream.Send(&req); err != nil {
-		return err
-	}
-
-	if attach {
-		if _, err := stream.Recv(); err != nil {
-			return err
-		}
-
-		return nil
-	}
-
-	cmd := types.PodStartMessage{
-		Data: []byte("ls\n"),
-	}
-	if err := stream.Send(&cmd); err != nil {
-		return err
-	}
-	if _, err := stream.Recv(); err != nil {
 		return err
 	}
 
@@ -642,4 +724,27 @@ func (c *HyperClient) Ping() (*types.PingResponse, error) {
 	}
 
 	return resp, nil
+}
+
+// ContainerSignal sends a signal to specified container of specified pod
+func (c *HyperClient) ContainerSignal(podID, containerID string, signal int64) error {
+	_, err := c.client.ContainerSignal(c.ctx, &types.ContainerSignalRequest{
+		PodID:       podID,
+		ContainerID: containerID,
+		Signal:      signal,
+	})
+
+	return err
+}
+
+// TTYResize resizes the tty of the specified container
+func (c *HyperClient) TTYResize(containerID, execID string, height, width int32) error {
+	_, err := c.client.TTYResize(c.ctx, &types.TTYResizeRequest{
+		ContainerID: containerID,
+		ExecID:      execID,
+		Height:      height,
+		Width:       width,
+	})
+
+	return err
 }

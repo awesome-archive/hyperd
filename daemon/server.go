@@ -8,18 +8,15 @@ import (
 	"strings"
 
 	"github.com/docker/distribution/digest"
-	"github.com/docker/docker/pkg/version"
 	"github.com/docker/docker/reference"
 	"github.com/docker/engine-api/types"
-	"github.com/docker/engine-api/types/container"
-	"github.com/docker/engine-api/types/strslice"
 	"github.com/golang/glog"
 	"github.com/hyperhq/hyperd/engine"
+	"github.com/hyperhq/hyperd/errors"
 	"github.com/hyperhq/hyperd/lib/sysinfo"
+	"github.com/hyperhq/hyperd/libmoby/distribution"
 	apitypes "github.com/hyperhq/hyperd/types"
 	"github.com/hyperhq/hyperd/utils"
-	"github.com/hyperhq/runv/hypervisor/pod"
-	hypervisortypes "github.com/hyperhq/runv/hypervisor/types"
 )
 
 func (daemon *Daemon) CmdImages(args, filter string, all bool) (*engine.Env, error) {
@@ -38,6 +35,11 @@ func (daemon *Daemon) CmdImages(args, filter string, all bool) (*engine.Env, err
 		size := fmt.Sprintf("%d", i.VirtualSize)
 		for _, r := range i.RepoTags {
 			imagesList = append(imagesList, r+":"+id[1]+":"+created+":"+size)
+		}
+		if len(i.RepoTags) == 0 {
+			slice := strings.Split(i.RepoDigests[0], "@")
+			repoTag := slice[0] + ":" + "<none>"
+			imagesList = append(imagesList, repoTag+":"+id[1]+":"+created+":"+size)
 		}
 	}
 
@@ -70,93 +72,25 @@ func (daemon *Daemon) CmdCommitImage(name string, cfg *types.ContainerCommitConf
 }
 
 func (daemon *Daemon) CreateContainerInPod(podId string, spec *apitypes.UserContainer) (string, error) {
-	var err error
-
 	p, ok := daemon.PodList.Get(podId)
 	if !ok {
 		return "", fmt.Errorf("The pod(%s) can not be found", podId)
 	}
 
-	p.Lock()
-	defer p.Unlock()
-
-	config := &container.Config{
-		Image:           spec.Image,
-		Cmd:             strslice.New(spec.Command...),
-		NetworkDisabled: true,
+	if daemon.buffer != nil {
+		return daemon.buffer.CreateContainerInPod(p, spec)
 	}
 
-	if len(spec.Entrypoint) != 0 {
-		config.Entrypoint = strslice.New(spec.Entrypoint...)
-	}
+	return p.ContainerCreate(spec)
+}
 
-	if len(spec.Envs) != 0 {
-		envs := []string{}
-		for _, env := range spec.Envs {
-			envs = append(envs, env.Env+"="+env.Value)
-		}
-		config.Env = envs
-	}
+func (daemon *Daemon) StartContainer(containerId string) error {
 
-	ccs, err := daemon.Daemon.ContainerCreate(types.ContainerCreateConfig{
-		Name:   spec.Name,
-		Config: config,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	glog.Infof("create container %s", ccs.ID)
-
-	defer func(id string) {
-		if err != nil {
-			glog.V(3).Infof("rollback container %s of %s", id, p.Id)
-			daemon.Daemon.ContainerRm(id, &types.ContainerRmConfig{})
-		}
-	}(ccs.ID)
-
-	r, err := daemon.ContainerInspect(ccs.ID, false, version.Version("1.21"))
-	if err != nil {
-		return "", err
-	}
-
-	rsp, ok := r.(*types.ContainerJSON)
+	p, cid, ok := daemon.PodList.GetByContainerIdOrName(containerId)
 	if !ok {
-		err = fmt.Errorf("fail to unpack container json response for %s of %s", spec.Name, p.Id)
-		return "", err
+		return fmt.Errorf("The container (%s) can not be found", containerId)
 	}
-
-	jsons, err := p.TryLoadContainers(daemon)
-	if err != nil {
-		return "", err
-	}
-	jsons = append(jsons, rsp)
-
-	glog.V(3).Infof("ContainerJSON for container %s: %v", ccs.ID, *rsp)
-	p.Status().AddContainer(rsp.ID, "/"+rsp.Name, rsp.Image, rsp.Config.Cmd.Slice(), hypervisortypes.S_POD_CREATED)
-	p.Spec.Containers = append(p.Spec.Containers, convertToRunvContainerSpec(spec, p.Spec.Tty))
-
-	podSpec, err := json.Marshal(p.Spec)
-	if err != nil {
-		glog.Errorf("Marshal podspec %v failed: %v", p.Spec, err)
-		return "", err
-	}
-	if err = daemon.db.UpdatePod(p.Id, podSpec); err != nil {
-		glog.Errorf("Found an error while saving the POD file: %v", err)
-		return "", err
-	}
-
-	if err = p.ParseContainerJsons(daemon, jsons); err != nil {
-		glog.Errorf("Found an error while parsing the Containers json: %v", err)
-		return "", err
-	}
-	daemon.PodList.Put(p)
-	if err = daemon.WritePodAndContainers(p.Id); err != nil {
-		glog.Errorf("Found an error while saving the Containers info: %v", err)
-		return "", err
-	}
-
-	return ccs.ID, nil
+	return p.ContainerStart(cid)
 }
 
 func (daemon *Daemon) CmdCreateContainer(podId string, containerArgs []byte) (string, error) {
@@ -171,6 +105,16 @@ func (daemon *Daemon) CmdCreateContainer(podId string, containerArgs []byte) (st
 	return daemon.CreateContainerInPod(podId, &c)
 }
 
+func (daemon *Daemon) CmdStartContainer(containerId string) (*engine.Env, error) {
+	err := daemon.StartContainer(containerId)
+	if err != nil {
+		glog.Errorf("fail to start container %s: %v", containerId, err)
+		return nil, err
+	}
+	v := &engine.Env{}
+	return v, nil
+}
+
 func (daemon *Daemon) CmdKillContainer(name string, sig int64) (*engine.Env, error) {
 	err := daemon.KillContainer(name, sig)
 	if err != nil {
@@ -182,9 +126,19 @@ func (daemon *Daemon) CmdKillContainer(name string, sig int64) (*engine.Env, err
 }
 
 func (daemon *Daemon) CmdStopContainer(name string) (*engine.Env, error) {
-	err := daemon.StopContainer(name)
+	err := daemon.StopContainer(name, 5)
 	if err != nil {
 		glog.Errorf("fail to stop container %s: %v", name, err)
+		return nil, err
+	}
+	v := &engine.Env{}
+	return v, nil
+}
+
+func (daemon *Daemon) CmdRemoveContainer(name string) (*engine.Env, error) {
+	err := daemon.RemoveContainer(name)
+	if err != nil {
+		glog.Errorf("failed to remove container %s: %v", name, err)
 		return nil, err
 	}
 	v := &engine.Env{}
@@ -257,8 +211,8 @@ func (daemon *Daemon) CmdGetContainerInfo(name string) (interface{}, error) {
 	return daemon.GetContainerInfo(name)
 }
 
-func (daemon *Daemon) CmdList(item, podId, vmId string, auxiliary bool) (*engine.Env, error) {
-	list, err := daemon.List(item, podId, vmId, auxiliary)
+func (daemon *Daemon) CmdList(item, podId, vmId string) (*engine.Env, error) {
+	list, err := daemon.List(item, podId, vmId)
 	if err != nil {
 		return nil, err
 	}
@@ -290,22 +244,18 @@ func (daemon *Daemon) CmdSetPodLabels(podId string, override bool, labels map[st
 	return v, nil
 }
 
-func (daemon *Daemon) CmdStartPod(stdin io.ReadCloser, stdout io.WriteCloser, podId, vmId string, attach bool) (*engine.Env, error) {
-	code, cause, err := daemon.StartPod(stdin, stdout, podId, vmId, attach)
+func (daemon *Daemon) CmdStartPod(podId string) (*engine.Env, error) {
+	err := daemon.StartPod(podId)
 	if err != nil {
 		return nil, err
 	}
 
 	v := &engine.Env{}
-	v.Set("ID", vmId)
-	v.SetInt("Code", code)
-	v.Set("Cause", cause)
-
 	return v, nil
 }
 
 //FIXME: there was a `config` argument passed by docker/builder, but we never processed it.
-func (daemon *Daemon) CmdCreatePod(podArgs string, autoremove bool) (*engine.Env, error) {
+func (daemon *Daemon) CmdCreatePod(podArgs string) (*engine.Env, error) {
 	var podSpec apitypes.UserPod
 	err := json.Unmarshal([]byte(podArgs), &podSpec)
 	if err != nil {
@@ -318,7 +268,7 @@ func (daemon *Daemon) CmdCreatePod(podArgs string, autoremove bool) (*engine.Env
 	}
 
 	v := &engine.Env{}
-	v.Set("ID", p.Id)
+	v.Set("ID", p.Id())
 	v.SetInt("Code", 0)
 	v.Set("Cause", "")
 
@@ -339,7 +289,7 @@ func (daemon *Daemon) CmdContainerRename(oldname, newname string) (*engine.Env, 
 }
 
 func (daemon *Daemon) CmdCleanPod(podId string) (*engine.Env, error) {
-	code, cause, err := daemon.CleanPod(podId)
+	code, cause, err := daemon.RemovePod(podId)
 	if err != nil {
 		return nil, err
 	}
@@ -350,6 +300,60 @@ func (daemon *Daemon) CmdCleanPod(podId string) (*engine.Env, error) {
 	v.Set("Cause", cause)
 
 	return v, nil
+}
+
+// pod level port mappings API
+func (daemon *Daemon) CmdListPortMappings(podId string) (*engine.Env, error) {
+	p, ok := daemon.PodList.Get(podId)
+	if !ok {
+		return nil, errors.ErrPodNotFound.WithArgs(podId)
+	}
+
+	pms := p.ListPortMappings()
+	v := &engine.Env{}
+	v.SetJson("portMappings", pms)
+
+	return v, nil
+}
+
+func (daemon *Daemon) CmdAddPortMappings(podId string, req []byte) (*engine.Env, error) {
+	p, ok := daemon.PodList.Get(podId)
+	if !ok {
+		return nil, errors.ErrPodNotFound.WithArgs(podId)
+	}
+
+	var pms []*apitypes.PortMapping
+	err := json.Unmarshal(req, &pms)
+	if err != nil {
+		return nil, errors.ErrBadJsonFormat.WithArgs(err)
+	}
+
+	err = p.AddPortMapping(pms)
+	if err != nil {
+		return nil, err
+	}
+
+	return &engine.Env{}, nil
+}
+
+func (daemon *Daemon) CmdDeletePortMappings(podId string, req []byte) (*engine.Env, error) {
+	p, ok := daemon.PodList.Get(podId)
+	if !ok {
+		return nil, errors.ErrPodNotFound.WithArgs(podId)
+	}
+
+	var pms []*apitypes.PortMapping
+	err := json.Unmarshal(req, &pms)
+	if err != nil {
+		return nil, errors.ErrBadJsonFormat.WithArgs(err)
+	}
+
+	err = p.RemovePortMappingByDest(pms)
+	if err != nil {
+		return nil, err
+	}
+
+	return &engine.Env{}, nil
 }
 
 func (daemon *Daemon) CmdImageDelete(name string, force, prune bool) ([]*apitypes.ImageDelete, error) {
@@ -375,12 +379,17 @@ func (daemon *Daemon) CmdImagePull(image, tag string, authConfig *types.AuthConf
 	// compatibility.
 	image = strings.TrimSuffix(image, ":")
 
-	var ref reference.Named
+	var (
+		ref    reference.Named
+		pnamed reference.Named
+		tagged bool
+	)
 	ref, err := reference.ParseNamed(image)
 	if err != nil {
 		return err
 	}
 
+	glog.Infof("getting image: %s:%s", ref.String(), tag)
 	if tag != "" {
 		// The "tag" could actually be a digest.
 		var dgst digest.Digest
@@ -392,7 +401,37 @@ func (daemon *Daemon) CmdImagePull(image, tag string, authConfig *types.AuthConf
 		}
 	}
 
-	return daemon.Daemon.PullImage(ref, metaHeaders, authConfig, output)
+	err = daemon.Daemon.PullImage(ref, metaHeaders, authConfig, output)
+	if err != nil {
+		glog.Errorf("failed to pull image %s", ref.String())
+		return err
+	}
+
+	glog.Infof("got image: %s", ref.String())
+
+	// pull digest again for tagged reference. This is because of an issue of
+	// docker 1.10.3. And will remove this work around once we update the docker
+	// dep to the latest version.
+	if _, tagged = ref.(reference.NamedTagged); tagged {
+		pnamed, _ = reference.WithName(ref.FullName())
+		dgst, err := distribution.GetDigestFromTag(daemon.Daemon.RegistryService, ref, metaHeaders, authConfig)
+		if err != nil {
+			glog.Errorf("failed to get digest for %s: %v", ref.String(), err)
+			err = nil
+		} else if dgst != "" {
+			glog.Infof("pull image of %s for its digest: %v", ref.String(), dgst)
+			ref, err = reference.WithDigest(pnamed, dgst)
+			err = daemon.Daemon.PullImage(ref, metaHeaders, authConfig, output)
+			if err != nil {
+				glog.Warningf("failed to get accompanied digest image for %s: %v", ref.String(), err)
+				err = nil
+			}
+		} else {
+			glog.Infof("no digest available for %s", ref.String())
+		}
+	}
+
+	return nil
 }
 
 func (daemon *Daemon) CmdImagePush(repo, tag string, authConfig *types.AuthConfig, metaHeaders map[string][]string, output io.Writer) error {
@@ -447,36 +486,8 @@ func (daemon *Daemon) CmdTtyResize(containerId, execId string, h, w int) error {
 	return daemon.TtyResize(containerId, execId, h, w)
 }
 
-func (daemon *Daemon) CmdCreateVm(cpu, mem int, async bool) (*engine.Env, error) {
-	vm, err := daemon.CreateVm(cpu, mem, async)
-	if err != nil {
-		return nil, err
-	}
-
-	v := &engine.Env{}
-	v.Set("ID", vm.Id)
-	v.SetInt("Code", 0)
-	v.Set("Cause", "")
-
-	return v, nil
-}
-
-func (daemon *Daemon) CmdKillVm(vmId string) (*engine.Env, error) {
-	code, cause, err := daemon.KillVm(vmId)
-	if err != nil {
-		return nil, err
-	}
-
-	v := &engine.Env{}
-	v.Set("ID", vmId)
-	v.SetInt("Code", code)
-	v.Set("Cause", cause)
-
-	return v, nil
-}
-
 func (daemon *Daemon) CmdAddService(podId, data string) (*engine.Env, error) {
-	var srvs []pod.UserService
+	var srvs []*apitypes.UserService
 	err := json.Unmarshal([]byte(data), &srvs)
 	if err != nil {
 		return nil, err
@@ -493,7 +504,7 @@ func (daemon *Daemon) CmdAddService(podId, data string) (*engine.Env, error) {
 }
 
 func (daemon *Daemon) CmdUpdateService(podId, data string) (*engine.Env, error) {
-	var srvs []pod.UserService
+	var srvs []*apitypes.UserService
 	err := json.Unmarshal([]byte(data), &srvs)
 	if err != nil {
 		return nil, err
@@ -510,7 +521,7 @@ func (daemon *Daemon) CmdUpdateService(podId, data string) (*engine.Env, error) 
 }
 
 func (daemon *Daemon) CmdDeleteService(podId, data string) (*engine.Env, error) {
-	var srvs []pod.UserService
+	var srvs []*apitypes.UserService
 	err := json.Unmarshal([]byte(data), &srvs)
 	if err != nil {
 		return nil, err
@@ -526,7 +537,7 @@ func (daemon *Daemon) CmdDeleteService(podId, data string) (*engine.Env, error) 
 	return v, nil
 }
 
-func (daemon *Daemon) CmdGetServices(podId string) ([]pod.UserService, error) {
+func (daemon *Daemon) CmdGetServices(podId string) ([]*apitypes.UserService, error) {
 	return daemon.GetServices(podId)
 }
 

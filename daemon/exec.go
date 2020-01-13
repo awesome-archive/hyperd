@@ -5,97 +5,68 @@ import (
 	"io"
 
 	"github.com/golang/glog"
-	"github.com/hyperhq/hyperd/utils"
-	"github.com/hyperhq/runv/hypervisor"
-	"github.com/hyperhq/runv/hypervisor/types"
 )
 
 func (daemon *Daemon) ExitCode(containerId, execId string) (int, error) {
-	glog.V(1).Infof("Get container id %s, exec id %s", containerId, execId)
 
-	pod, _, err := daemon.GetPodByContainerIdOrName(containerId)
-	if err != nil {
-		return -1, err
+	p, id, ok := daemon.PodList.GetByContainerIdOrName(containerId)
+	if !ok {
+		err := fmt.Errorf("cannot find container %s", containerId)
+		glog.Error(err)
+		return 255, err
 	}
 
-	status := pod.Status()
-	if status == nil {
-		return -1, fmt.Errorf("cannot find status of pod %s", pod.Id)
-	}
+	glog.V(1).Infof("Get Exec Code for container %s", containerId)
 
-	if execId != "" {
-		if es := status.GetExec(execId); es != nil {
-			return int(es.ExitCode), nil
-		}
-		return -1, fmt.Errorf("cannot find exec %s", execId)
-	}
-
-	if cs := status.GetContainer(containerId); cs != nil {
-		return int(cs.ExitCode), nil
-	}
-
-	return -1, fmt.Errorf("cannot find container %s", containerId)
+	code, err := p.GetExitCode(id, execId)
+	return int(code), err
 }
 
 func (daemon *Daemon) CreateExec(containerId, cmd string, terminal bool) (string, error) {
-	execId := fmt.Sprintf("exec-%s", utils.RandStr(10, "alpha"))
 
-	glog.V(1).Infof("Get container id is %s", containerId)
-	pod, _, err := daemon.GetPodByContainerIdOrName(containerId)
-	if err != nil {
+	p, id, ok := daemon.PodList.GetByContainerIdOrName(containerId)
+	if !ok {
+		err := fmt.Errorf("cannot find container %s", containerId)
+		glog.Error(err)
 		return "", err
 	}
 
-	status := pod.Status()
-	if status == nil || status.Status != types.S_POD_RUNNING {
-		return "", fmt.Errorf("container %s is not running", containerId)
-	}
-
-	status.AddExec(containerId, execId, cmd, terminal)
-	return execId, nil
+	glog.V(1).Infof("Create Exec for container %s", containerId)
+	return p.CreateExec(id, cmd, terminal)
 }
 
 func (daemon *Daemon) StartExec(stdin io.ReadCloser, stdout io.WriteCloser, containerId, execId string) error {
-	tty := &hypervisor.TtyIO{
-		Stdin:    stdin,
-		Stdout:   stdout,
-		Callback: make(chan *types.VmResponse, 1),
-	}
-
-	glog.V(1).Infof("Get container id is %s", containerId)
-	pod, _, err := daemon.GetPodByContainerIdOrName(containerId)
-	if err != nil {
-		return err
-	}
-
-	status := pod.Status()
-	if status == nil || status.Status != types.S_POD_RUNNING {
-		return fmt.Errorf("container %s is not running", containerId)
-	}
-
-	es := status.GetExec(execId)
-	if es == nil {
-		return fmt.Errorf("Can not find exec %s", execId)
-	}
-
-	vmId, err := daemon.GetVmByPodId(pod.Id)
-	if err != nil {
-		return err
-	}
-
-	vm, ok := daemon.VmList.Get(vmId)
+	p, id, ok := daemon.PodList.GetByContainerIdOrName(containerId)
 	if !ok {
-		err = fmt.Errorf("Can not find VM whose Id is %s!", vmId)
+		err := fmt.Errorf("cannot find container %s", containerId)
+		glog.Error(err)
 		return err
 	}
 
-	if err := vm.Exec(es.Container, es.Id, es.Cmds, es.Terminal, tty); err != nil {
+	glog.V(1).Infof("Start Exec for container %s", containerId)
+	return p.StartExec(stdin, stdout, id, execId)
+}
+
+func (daemon *Daemon) KillExec(containerId string, execId string, signal int64) error {
+	p, _, ok := daemon.PodList.GetByContainerIdOrName(containerId)
+	if !ok {
+		err := fmt.Errorf("cannot find container %s", containerId)
+		glog.Error(err)
 		return err
 	}
 
-	defer func() {
-		glog.V(2).Info("Defer function for exec!")
-	}()
+	glog.V(1).Infof("Kill Exec for container %s", containerId)
+	return p.KillExec(execId, signal)
+}
 
-	return nil
+func (daemon *Daemon) ExecVM(podID, cmd string, stdin io.ReadCloser, stdout, stderr io.WriteCloser) (int, error) {
+	glog.V(3).Infof("Starting ExecVM for pod %s", podID)
+	p, ok := daemon.PodList.Get(podID)
+	if !ok {
+		err := fmt.Errorf("cannot find pod %s", podID)
+		glog.Error(err)
+		return -1, err
+	}
+
+	return p.ExecVM(cmd, stdin, stdout, stderr)
 }

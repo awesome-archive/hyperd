@@ -11,7 +11,7 @@ import (
 
 func (cli *HyperClient) HyperCmdAttach(args ...string) error {
 	var parser = gflag.NewParser(nil, gflag.Default)
-	parser.Usage = "attach CONTAINER\n\nAttach to the tty of a specified container in a pod"
+	parser.Usage = "attach CONTAINER\n\nAttach to the input/output of a specified container"
 	args, err := parser.ParseArgs(args)
 	if err != nil {
 		if !strings.Contains(err.Error(), "Usage") {
@@ -67,5 +67,6 @@ func (cli *HyperClient) HyperCmdAttach(args ...string) error {
 		return err
 	}
 
-	return cli.client.GetExitCode(containerId, "")
+	// a container having tty may detach from the terminal, don't wait
+	return cli.client.GetExitCode(containerId, "", !tty)
 }

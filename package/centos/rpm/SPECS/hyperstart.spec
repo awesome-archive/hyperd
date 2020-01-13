@@ -1,6 +1,6 @@
 Summary:            Hyperstart is the initrd for hyper VM
 Name:               hyperstart
-Version:            0.6
+Version:            1.1.0
 Release:            1%{?dist}
 License:            Apache License, Version 2.0
 Group:              System Environment/Base
@@ -8,13 +8,12 @@ Group:              System Environment/Base
 # following commands to generate the tarball:
 #  git archive --format=tar.gz master > hyperstart-%{version}.tar.gz
 Source0:            %{name}-%{version}.tar.gz
-URL:                https://hyper.sh/
+URL:                https://github.com/hyperhq/hyperstart/
 ExclusiveArch:      x86_64
 
 %description
-Hyperstart is the initrd for hyper VM, hyperstart 
-includes the kernel and initrd, qboot bios and cbfs rom
-image.
+Hyperstart is the init process for hyper VM, hyperstart package
+includes the guest kernel and the initramfs image.
 
 %prep
 mkdir -p %{_builddir}/src/github.com/hyperhq/hyperstart
@@ -28,7 +27,7 @@ make %{?_smp_mflags}
 
 %install
 mkdir -p %{buildroot}%{_sharedstatedir}/hyper
-cp %{_builddir}/src/github.com/hyperhq/hyperstart/build/kernel %{buildroot}%{_sharedstatedir}/hyper/
+cp %{_builddir}/src/github.com/hyperhq/hyperstart/build/arch/`uname -m`/kernel %{buildroot}%{_sharedstatedir}/hyper/
 cp %{_builddir}/src/github.com/hyperhq/hyperstart/build/hyper-initrd.img %{buildroot}%{_sharedstatedir}/hyper/
 
 %clean
@@ -38,6 +37,18 @@ rm -rf %{buildroot}
 %{_sharedstatedir}/*
 
 %changelog
+* Mon Sep 17 2018 Hyper Dev Team <dev@hyper.sh> - 1.1.0-1
+- update source to 1.1.0
+* Thu Sep 28 2017 Hyper Dev Team <dev@hyper.sh> - 1.0.0-1
+- update source to 1.0.0
+* Mon May 8 2017 Hyper Dev Team <dev@hyper.sh> - 0.8.1-1
+- update source to 0.8.1
+* Mon Mar 20 2017 Hyper Dev Team <dev@hyper.sh> - 0.8.0-1
+- update source to 0.8.0
+* Fri Oct 28 2016 Hyper Dev Team <dev@hyper.sh> - 0.7.0-1
+- update source to 0.7.0
+* Mon Aug 29 2016 Hyper Dev Team <dev@hyper.sh> - 0.6.2-1
+- update source to 0.6.2
 * Thu Apr 28 2016 Hyper Dev Team <dev@hyper.sh> - 0.6-1
 - update source to 0.6
 - kernel update to 4.4.7 with modules provided

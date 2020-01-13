@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/docker/pkg/stdcopy"
+
 	"github.com/hyperhq/hyperd/lib/promise"
 	"github.com/hyperhq/hyperd/utils"
 )
@@ -118,10 +120,6 @@ func (cli *Client) hijack(method, path string, setRawTerminal bool, in io.ReadCl
 		receiveStdout chan error
 	)
 
-	if in != nil && setRawTerminal {
-		// fmt.Printf("In the Raw Terminal!!!\n")
-	}
-
 	if stdout != nil || stderr != nil {
 		receiveStdout = promise.Go(func() (err error) {
 			defer func() {
@@ -131,7 +129,11 @@ func (cli *Client) hijack(method, path string, setRawTerminal bool, in io.ReadCl
 				}
 			}()
 
-			_, err = io.Copy(stdout, br)
+			if !setRawTerminal {
+				_, err = stdcopy.StdCopy(stdout, stderr, br)
+			} else {
+				_, err = io.Copy(stdout, br)
+			}
 			// fmt.Printf("[hijack] End of stdout\n")
 			return err
 		})

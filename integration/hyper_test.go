@@ -1,8 +1,10 @@
 package integration
 
 import (
+	"io"
 	"testing"
 
+	"github.com/hyperhq/hyperd/lib/promise"
 	"github.com/hyperhq/hyperd/types"
 	. "gopkg.in/check.v1"
 )
@@ -42,7 +44,7 @@ func (s *TestSuite) TestGetVMList(c *C) {
 }
 
 func (s *TestSuite) TestGetContainerList(c *C) {
-	containerList, err := s.client.GetContainerList(true)
+	containerList, err := s.client.GetContainerList()
 	c.Assert(err, IsNil)
 	c.Logf("Got ContainerList %v", containerList)
 }
@@ -54,7 +56,7 @@ func (s *TestSuite) TestGetImageList(c *C) {
 }
 
 func (s *TestSuite) TestGetContainerInfo(c *C) {
-	containerList, err := s.client.GetContainerList(true)
+	containerList, err := s.client.GetContainerList()
 	c.Assert(err, IsNil)
 	c.Logf("Got ContainerList %v", containerList)
 
@@ -68,7 +70,7 @@ func (s *TestSuite) TestGetContainerInfo(c *C) {
 }
 
 func (s *TestSuite) TestGetContainerLogs(c *C) {
-	containerList, err := s.client.GetContainerList(true)
+	containerList, err := s.client.GetContainerList()
 	c.Assert(err, IsNil)
 	c.Logf("Got ContainerList %v", containerList)
 
@@ -82,13 +84,13 @@ func (s *TestSuite) TestGetContainerLogs(c *C) {
 }
 
 func (s *TestSuite) TestPostAttach(c *C) {
-	err := s.client.PullImage("busybox", "latest", nil)
+	err := s.client.PullImage("hyperhq/busybox", "latest", nil)
 	c.Assert(err, IsNil)
 
 	spec := types.UserPod{
 		Containers: []*types.UserContainer{
 			{
-				Image: "busybox",
+				Image: "hyperhq/busybox",
 			},
 		},
 	}
@@ -98,13 +100,13 @@ func (s *TestSuite) TestPostAttach(c *C) {
 	c.Logf("Pod created: %s", pod)
 	defer s.client.RemovePod(pod)
 
-	err = s.client.StartPod(pod, "", false)
+	err = s.client.StartPod(pod)
 	c.Assert(err, IsNil)
 
 	podInfo, err := s.client.GetPodInfo(pod)
 	c.Assert(err, IsNil)
 
-	err = s.client.PostAttach(podInfo.Status.ContainerStatus[0].ContainerID)
+	err = s.client.PostAttach(podInfo.Status.ContainerStatus[0].ContainerID, false)
 	c.Assert(err, IsNil)
 }
 
@@ -122,28 +124,6 @@ func (s *TestSuite) TestGetPodInfo(c *C) {
 	c.Logf("Got PodInfo %v", info)
 }
 
-func (s *TestSuite) TestGetVMCreateRemove(c *C) {
-	vm, err := s.client.CreateVM(1, 64)
-	c.Assert(err, IsNil)
-
-	var found = false
-	vmList, err := s.client.GetVMList()
-	c.Assert(err, IsNil)
-	c.Logf("Got VMList %v", vmList)
-	for _, v := range vmList {
-		if v.VmID == vm {
-			found = true
-		}
-	}
-	if !found {
-		c.Errorf("Can't find vm %s", vm)
-	}
-
-	resp, err := s.client.RemoveVM(vm)
-	c.Assert(err, IsNil)
-	c.Logf("RemoveVM resp %s", resp.String())
-}
-
 func (s *TestSuite) TestCreateAndStartPod(c *C) {
 	err := s.client.PullImage("busybox", "latest", nil)
 	c.Assert(err, IsNil)
@@ -152,7 +132,7 @@ func (s *TestSuite) TestCreateAndStartPod(c *C) {
 		Id: "busybox",
 		Containers: []*types.UserContainer{
 			{
-				Image: "busybox",
+				Image: "hyperhq/busybox",
 			},
 		},
 	}
@@ -176,7 +156,7 @@ func (s *TestSuite) TestCreateAndStartPod(c *C) {
 		c.Errorf("Can't found pod %s", pod)
 	}
 
-	err = s.client.StartPod(pod, "", false)
+	err = s.client.StartPod(pod)
 	c.Assert(err, IsNil)
 
 	podInfo, err := s.client.GetPodInfo(pod)
@@ -188,7 +168,7 @@ func (s *TestSuite) TestCreateAndStartPod(c *C) {
 }
 
 func (s *TestSuite) TestCreateContainer(c *C) {
-	err := s.client.PullImage("busybox", "latest", nil)
+	err := s.client.PullImage("hyperhq/busybox", "latest", nil)
 	c.Assert(err, IsNil)
 
 	spec := types.UserPod{}
@@ -197,7 +177,7 @@ func (s *TestSuite) TestCreateContainer(c *C) {
 	c.Logf("Pod created: %s", pod)
 
 	container, err := s.client.CreateContainer(pod, &types.UserContainer{
-		Image: "busybox",
+		Image: "hyperhq/busybox",
 	})
 	c.Assert(err, IsNil)
 	c.Logf("Container created: %s", container)
@@ -211,7 +191,7 @@ func (s *TestSuite) TestCreateContainer(c *C) {
 }
 
 func (s *TestSuite) TestRenameContainer(c *C) {
-	err := s.client.PullImage("busybox", "latest", nil)
+	err := s.client.PullImage("hyperhq/busybox", "latest", nil)
 	c.Assert(err, IsNil)
 
 	spec := types.UserPod{}
@@ -220,7 +200,7 @@ func (s *TestSuite) TestRenameContainer(c *C) {
 	c.Logf("Pod created: %s", pod)
 
 	container, err := s.client.CreateContainer(pod, &types.UserContainer{
-		Image: "busybox",
+		Image: "hyperhq/busybox",
 	})
 	c.Assert(err, IsNil)
 	c.Logf("Container created: %s", container)
@@ -276,17 +256,14 @@ func (s *TestSuite) TestPullImage(c *C) {
 }
 
 func (s *TestSuite) TestAddListDeleteService(c *C) {
-	err := s.client.PullImage("haproxy", "1.4", nil)
-	c.Assert(err, IsNil)
-
 	spec := types.UserPod{
 		Containers: []*types.UserContainer{
 			{
-				Image:   "busybox",
+				Image:   "hyperhq/busybox",
 				Command: []string{"sleep", "10000"},
 			},
 			{
-				Image:   "busybox",
+				Image:   "hyperhq/busybox",
 				Command: []string{"sleep", "10000"},
 			},
 		},
@@ -305,6 +282,8 @@ func (s *TestSuite) TestAddListDeleteService(c *C) {
 		},
 	}
 
+	c.Log("begin ===> create pod")
+
 	pod, err := s.client.CreatePod(&spec)
 	c.Assert(err, IsNil)
 
@@ -314,7 +293,9 @@ func (s *TestSuite) TestAddListDeleteService(c *C) {
 		c.Assert(err, IsNil)
 	}()
 
-	err = s.client.StartPod(pod, "", false)
+	c.Log("    2 ===> create pod")
+
+	err = s.client.StartPod(pod)
 	c.Assert(err, IsNil)
 
 	updateService := []*types.UserService{
@@ -331,9 +312,11 @@ func (s *TestSuite) TestAddListDeleteService(c *C) {
 		},
 	}
 
+	c.Log("    3 ===> update service")
 	err = s.client.UpdateService(pod, updateService)
 	c.Assert(err, IsNil)
 
+	c.Log("    4 ===> list service")
 	svcList, err := s.client.ListService(pod)
 	c.Assert(err, IsNil)
 	c.Assert(len(svcList), Equals, 1)
@@ -353,16 +336,21 @@ func (s *TestSuite) TestAddListDeleteService(c *C) {
 		},
 	}
 
+	c.Log("    5 ===> add service")
 	err = s.client.AddService(pod, addService)
 	c.Assert(err, IsNil)
+	c.Log("    6 ===> list service")
 	svcList, err = s.client.ListService(pod)
 	c.Assert(err, IsNil)
 	c.Assert(len(svcList), Equals, 2)
 
+	c.Log("    7 ===> delete service")
 	err = s.client.DeleteService(pod, addService)
 	c.Assert(err, IsNil)
+	c.Log("    8 ===> list service")
 	svcList, err = s.client.ListService(pod)
 	c.Assert(len(svcList), Equals, 1)
+	c.Log("last  ===> done")
 }
 
 func (s *TestSuite) TestStartAndStopPod(c *C) {
@@ -370,7 +358,7 @@ func (s *TestSuite) TestStartAndStopPod(c *C) {
 		Id: "busybox",
 		Containers: []*types.UserContainer{
 			{
-				Image: "busybox",
+				Image: "hyperhq/busybox",
 			},
 		},
 	}
@@ -379,7 +367,7 @@ func (s *TestSuite) TestStartAndStopPod(c *C) {
 	c.Assert(err, IsNil)
 	c.Logf("Pod created: %s", pod)
 
-	err = s.client.StartPod(pod, "", false)
+	err = s.client.StartPod(pod)
 	c.Assert(err, IsNil)
 
 	podInfo, err := s.client.GetPodInfo(pod)
@@ -391,10 +379,11 @@ func (s *TestSuite) TestStartAndStopPod(c *C) {
 
 	podInfo, err = s.client.GetPodInfo(pod)
 	c.Assert(err, IsNil)
-	c.Assert(podInfo.Status.Phase, Equals, "Failed")
 
 	err = s.client.RemovePod(pod)
 	c.Assert(err, IsNil)
+
+	c.Assert(podInfo.Status.Phase, Equals, "Failed")
 }
 
 func (s *TestSuite) TestSetPodLabels(c *C) {
@@ -402,7 +391,7 @@ func (s *TestSuite) TestSetPodLabels(c *C) {
 		Id: "busybox",
 		Containers: []*types.UserContainer{
 			{
-				Image: "busybox",
+				Image: "hyperhq/busybox",
 			},
 		},
 	}
@@ -430,7 +419,7 @@ func (s *TestSuite) TestPauseAndUnpausePod(c *C) {
 		Id: "busybox",
 		Containers: []*types.UserContainer{
 			{
-				Image: "busybox",
+				Image: "hyperhq/busybox",
 			},
 		},
 	}
@@ -439,7 +428,7 @@ func (s *TestSuite) TestPauseAndUnpausePod(c *C) {
 	c.Assert(err, IsNil)
 	c.Logf("Pod created: %s", pod)
 
-	err = s.client.StartPod(pod, "", false)
+	err = s.client.StartPod(pod)
 	c.Assert(err, IsNil)
 
 	podInfo, err := s.client.GetPodInfo(pod)
@@ -477,7 +466,7 @@ func (s *TestSuite) TestGetPodStats(c *C) {
 		Id: "busybox",
 		Containers: []*types.UserContainer{
 			{
-				Image: "busybox",
+				Image: "hyperhq/busybox",
 			},
 		},
 	}
@@ -489,7 +478,7 @@ func (s *TestSuite) TestGetPodStats(c *C) {
 		c.Assert(err, IsNil)
 	}()
 
-	err = s.client.StartPod(podID, "", false)
+	err = s.client.StartPod(podID)
 	c.Assert(err, IsNil)
 
 	stats, err := s.client.GetPodStats(podID)
@@ -503,4 +492,132 @@ func (s *TestSuite) TestPing(c *C) {
 	resp, err := s.client.Ping()
 	c.Assert(err, IsNil)
 	c.Logf("Got HyperdStats %v", resp)
+}
+
+func (s *TestSuite) TestSendContainerSignal(c *C) {
+	sigKill := int64(9)
+	spec := types.UserPod{
+		Id: "busybox",
+	}
+
+	pod, err := s.client.CreatePod(&spec)
+	c.Assert(err, IsNil)
+	c.Logf("Pod created: %s", pod)
+
+	defer func() {
+		err = s.client.RemovePod(pod)
+		c.Assert(err, IsNil)
+	}()
+
+	container, err := s.client.CreateContainer(pod, &types.UserContainer{Image: "hyperhq/busybox"})
+	c.Assert(err, IsNil)
+	c.Logf("Container created: %s", container)
+
+	err = s.client.StartPod(pod)
+	c.Assert(err, IsNil)
+
+	containerInfo, err := s.client.GetContainerInfo(container)
+	c.Assert(err, IsNil)
+	c.Assert(containerInfo.Status.Phase, Equals, "running")
+
+	err = s.client.ContainerSignal(pod, container, sigKill)
+	c.Assert(err, IsNil)
+
+	exitCode, err := s.client.Wait(container, "", false)
+	c.Assert(err, IsNil)
+	c.Assert(exitCode, Equals, int32(137))
+
+	containerInfo, err = s.client.GetContainerInfo(container)
+	c.Assert(err, IsNil)
+	c.Assert(containerInfo.Status.Phase, Equals, "failed")
+}
+
+func (s *TestSuite) TestSendExecSignal(c *C) {
+	sigKill := int64(9)
+	cName := "test-exec-signal"
+	spec := types.UserPod{
+		Id: "busybox",
+		Containers: []*types.UserContainer{
+			{
+				Name:  cName,
+				Image: "hyperhq/busybox",
+			},
+		},
+	}
+	podID, err := s.client.CreatePod(&spec)
+	c.Assert(err, IsNil)
+
+	defer func() {
+		err = s.client.RemovePod(podID)
+		c.Assert(err, IsNil)
+	}()
+
+	err = s.client.StartPod(podID)
+	c.Assert(err, IsNil)
+
+	execId, err := s.client.ContainerExecCreate(cName, []string{"sh", "-c", "top"}, false)
+	c.Assert(err, IsNil)
+
+	outReader, outWriter := io.Pipe()
+	errC := promise.Go(func() error {
+		return s.client.ContainerExecStart(cName, execId, nil, outWriter, nil, false)
+	})
+
+	// make sure process has been started.
+	readC := make(chan struct{})
+	go func() {
+		buf := make([]byte, 32)
+		for {
+			n, err := outReader.Read(buf)
+			if err == nil && n > 0 {
+				readC <- struct{}{}
+				break
+			} else if err != nil && err != io.EOF {
+				errC <- err
+				break
+			}
+		}
+	}()
+
+	select {
+	case err = <-errC:
+		c.Assert(err, IsNil)
+	case <-readC:
+	}
+
+	err = s.client.ContainerExecSignal(cName, execId, sigKill)
+	c.Assert(err, IsNil)
+
+	exitCode, err := s.client.Wait(cName, execId, false)
+	c.Assert(err, IsNil)
+	c.Assert(exitCode, Equals, int32(0))
+}
+
+func (s *TestSuite) TestTTYResize(c *C) {
+	cName := "test-tty-resize"
+	spec := types.UserPod{
+		Id: "busybox",
+		Containers: []*types.UserContainer{
+			{
+				Name:  cName,
+				Image: "hyperhq/busybox",
+				Tty:   true,
+			},
+		},
+	}
+	podID, err := s.client.CreatePod(&spec)
+	c.Assert(err, IsNil)
+
+	defer func() {
+		err = s.client.RemovePod(podID)
+		c.Assert(err, IsNil)
+	}()
+
+	err = s.client.StartPod(podID)
+	c.Assert(err, IsNil)
+
+	err = s.client.TTYResize(cName, "", 400, 600)
+	c.Assert(err, IsNil)
+
+	//TODO: add a user process test when ListProcess is ready.
 }

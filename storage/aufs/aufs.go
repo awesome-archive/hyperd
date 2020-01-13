@@ -38,7 +38,7 @@ var (
 
 const MsRemount = syscall.MS_REMOUNT
 
-func MountContainerToSharedDir(containerId, rootDir, sharedDir, mountLabel string) (string, error) {
+func MountContainerToSharedDir(containerId, rootDir, sharedDir, mountLabel string, readonly bool) (string, error) {
 	var (
 		//mntPath = path.Join(rootDir, "mnt")
 		//layersPath = path.Join(rootDir, "layers")
@@ -54,7 +54,7 @@ func MountContainerToSharedDir(containerId, rootDir, sharedDir, mountLabel strin
 		return "", err
 	}
 
-	if err := aufsMount(diffs, path.Join(diffPath, containerId), mountPoint, mountLabel); err != nil {
+	if err := aufsMount(diffs, path.Join(diffPath, containerId), mountPoint, mountLabel, readonly); err != nil {
 		return "", fmt.Errorf("Fail to mount aufs dir to %s: %v", mountPoint, err)
 	}
 
@@ -75,7 +75,7 @@ func getParentDiffPaths(id, rootPath string) ([]string, error) {
 	return layers, nil
 }
 
-func aufsMount(ro []string, rw, target, mountLabel string) (err error) {
+func aufsMount(ro []string, rw, target, mountLabel string, readonly bool) (err error) {
 	defer func() {
 		if err != nil {
 			aufsUnmount(target)
@@ -87,10 +87,14 @@ func aufsMount(ro []string, rw, target, mountLabel string) (err error) {
 
 	offset := 54
 	if useDirperm() {
-		offset += len("dirperm1")
+		offset += len(",dirperm1")
+	}
+	perm := "rw"
+	if readonly {
+		perm = "ro"
 	}
 	b := make([]byte, syscall.Getpagesize()-len(mountLabel)-offset) // room for xino & mountLabel
-	bp := copy(b, fmt.Sprintf("br:%s=rw", rw))
+	bp := copy(b, fmt.Sprintf("br:%s=%s", rw, perm))
 
 	firstMount := true
 	i := 0
@@ -107,6 +111,7 @@ func aufsMount(ro []string, rw, target, mountLabel string) (err error) {
 			} else {
 				data := utils.FormatMountLabel(fmt.Sprintf("append%s", layer), mountLabel)
 				if err = syscall.Mount("none", target, "aufs", MsRemount, data); err != nil {
+					glog.Errorf("error mounting aufs data(%s): %s", data, err.Error())
 					return
 				}
 			}
@@ -119,6 +124,7 @@ func aufsMount(ro []string, rw, target, mountLabel string) (err error) {
 			}
 			data := utils.FormatMountLabel(fmt.Sprintf("%s,%s", string(b[:bp]), opts), mountLabel)
 			if err = syscall.Mount("none", target, "aufs", 0, data); err != nil {
+				glog.Errorf("error first mounting aufs data(%d): %s", len(data), err.Error())
 				return
 			}
 			firstMount = false

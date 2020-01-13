@@ -47,6 +47,7 @@ _testmain.go
 .idea
 /hyperctl
 /hyperd
+/vmlogd
 *.out
 *.pkg
 mac_installer/dist/opt/hyper/bin/hyperctl
@@ -65,11 +66,10 @@ package/fedora/rpm/SOURCES/*
 package/fedora/rpm/RPMS/*
 package/fedora/rpm/SRPMS/*
 package/fedora/fedora-rpm.pod
-Godeps/_workspace/src/github.com/golang/protobuf/protoc-gen-go/protoc-gen-go
-
-# supporting linux container on non-linux platform
-/Godeps/_workspace/src/github.com/opencontainers/specs/config-linux.go
-/Godeps/_workspace/src/github.com/opencontainers/specs/runtime-config-linux.go
 
 # binaries
-cmds/protoc-gen-gogo/protoc-gen-gogo
+cmd/protoc-gen-gogo/protoc-gen-gogo
+cmd/hyperd/hyperd
+cmd/hyperctl/hyperctl
+cmd/vmlogd/vmlogd
+

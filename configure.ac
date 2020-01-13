@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.69])
-AC_INIT([hyper], [0.6.0], [dev@hyper.sh])
+AC_INIT([hyper], [1.1.0], [dev@hyper.sh])
 AM_INIT_AUTOMAKE([-Wall -Werror foreign subdir-objects])
 AM_EXTRA_RECURSIVE_TARGETS([pkg])
 
@@ -68,8 +68,8 @@ LIBVIRT_REQUIRED="1.2.2"
 
 AC_ARG_WITH([libvirt],
             [AS_HELP_STRING([--without-libvirt],
-                            [run hyperd with libvirt])],
-            [with_libvirt=no],[with_libvirt=yes])
+                            [run hyperd without libvirt])],
+            [],[with_libvirt=yes])
 
 if test "$with_libvirt" = yes; then
 	PKG_CHECK_MODULES([libvirt], [libvirt >= $LIBVIRT_REQUIRED], [], [with_libvirt=no])
@@ -79,8 +79,8 @@ AM_CONDITIONAL([WITH_LIBVIRT], [test "x$with_libvirt" == "xyes"])
 
 AC_ARG_WITH([xen],
             [AS_HELP_STRING([--without-xen],
-                            [run hyperd with xen (libxl, need xen 4.5 or higher)])],
-            [with_xen=no],[with_xen=yes])
+                            [run hyperd without xen (libxl, need xen 4.5 or higher)])],
+            [],[with_xen=yes])
 
 if test "x$with_xen" != "xno" ; then
     # Checks for libxl
@@ -90,18 +90,45 @@ if test "x$with_xen" != "xno" ; then
     fi
 fi
 
+XEN_REQUIRED="4.5.0"
+XENPV_REQUIRED="4.9.0"
+
+if test "$with_xen" = yes; then
+    PKG_CHECK_MODULES([xen_4_5], [xenlight >= $XEN_REQUIRED], [with_xen=yes], [with_xen=no])
+    PKG_CHECK_MODULES([xen_4_9], [xenlight >= $XENPV_REQUIRED], [with_xen490=yes], [with_xen490=no])
+fi
+
 if test "x$with_xen" != "xno" ; then
     AC_DEFINE_UNQUOTED([WITH_XEN], 1, [run hyperd with xen])
 fi
+if test "$with_xen490" = yes ; then
+	AC_DEFINE_UNQUOTED([WITH_XEN490], 1, [run hyperd with xen 4.9 or above])
+fi
 
 AM_CONDITIONAL([WITH_XEN], [test "x$with_xen" == "xyes"])
+AM_CONDITIONAL([WITH_XEN490], [test "x$with_xen490" == "xyes"])
 
-AC_CONFIG_FILES([Makefile])
-case $build_os in
-	darwin*)
-		AC_CONFIG_FILES([mac_installer/Makefile])
-		;;
-esac
+AC_ARG_WITH([btrfs],
+            [AS_HELP_STRING([--without-btrfs],
+                            [compile hyperd without btrfs support])],
+            [],[with_btrfs=yes])
+
+if test "x$with_btrfs" != "xno"; then
+    AC_CHECK_HEADERS([btrfs/ioctl.h, btrfs/ctree.h], [with_btrfs=yes], [with_btrfs=no])
+    AC_CHECK_HEADERS([btrfs/version.h], [with_btrfs_header_version=yes], [with_btrfs_header_version=no])
+fi
+
+AM_CONDITIONAL([WITH_BTRFS], [test "x$with_btrfs" == "xyes"])
+AM_CONDITIONAL([WITH_BTRFS_HEADER_VERSION], [test "x$with_btrfs_header_version" == "xyes"])
+
+AM_EXTRA_RECURSIVE_TARGETS([hyperd hyperctl vmlogd])
+AC_CONFIG_FILES([
+	Makefile
+	cmd/Makefile
+	cmd/hyperd/Makefile
+	cmd/hyperctl/Makefile
+	cmd/vmlogd/Makefile
+])
 
 AC_OUTPUT
 
@@ -115,6 +142,8 @@ AC_MSG_RESULT([
 	with xen:   ${with_xen}
 
 	with libvirt: ${with_libvirt}
+
+	with btrfs: ${with_btrfs}
 
 	has virtualbox: ${has_virtualbox}
 ])

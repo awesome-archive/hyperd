@@ -14,7 +14,7 @@ HyperContainer - Hypervisor-agnostic Docker Runtime
 ## Why HyperContainer?
 -----------
 
-**HyperContainer combines the best from both world: VM and Container**.
+**HyperContainer combines the best from both worlds: VM and Container**.
 
 | -  | Container | VM | HyperContainer | 
 |---|---|---|---|
@@ -32,33 +32,29 @@ HyperContainer - Hypervisor-agnostic Docker Runtime
 
 ## Requirements
 
-- QEMU 2.0 or later
+- QEMU 2.0 or later (QEMU 2.6 or later for ARM64 Architecture)
 - Xen 4.5 and VT enabled host (for Xen support)
 
 ## Installation
 
-Ensure you are running Linux (kernel 3.8 or later) and have Docker
-(version 1.5 or later) and QEMU (version 2.0 or later) installed. Then download the [binary tarball](https://hyper-install.s3.amazonaws.com/hyper-latest.tgz) and install it directly.
+Ensure you are running Linux (kernel 3.8 or later) and have QEMU (version 2.0 or later) installed. 
+Then download the [binaries](http://download.hypercontainer.io/) and install them (hyper-container and hyperstart) directly.
 
-For RHEL/CentOS 7.x, you can use our [RPMs](http://docs.hypercontainer.io/get_started/install/linux.html)
+For the detail of installation, please refer to [the documents](https://docs.hypercontainer.io/get_started/install/linux.html).
 
 For information on using the command line, just type `hyperctl`. You may use
 `hyperctl <command> --help` for detailed information on any specific command.
 
 
-## Example
-
-
 ## Build From Source
 
-Clone hyperd and runv in GoPath
+Clone hyperd in GoPath
 
     > mkdir -p ${GOPATH}/src/github.com/hyperhq
     > cd ${GOPATH}/src/github.com/hyperhq
-    > git clone https://github.com/hyperhq/runv.git runv
     > git clone https://github.com/hyperhq/hyperd.git hyperd
 
-And make sure you have `go` (>= 1.4) , `device-mapper-devel`, and `autotools`, go into the `hyper` dir
+And make sure you have `go` (>= 1.7) , `device-mapper-devel`, and `autotools`, go into the `hyperd` dir
 
     > ./autogen.sh
     > ./configure

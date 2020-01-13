@@ -2,11 +2,8 @@ package pod
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
 	"io/ioutil"
 	"net/http"
-	"strconv"
 
 	"github.com/golang/glog"
 	"github.com/hyperhq/hyperd/server/httputils"
@@ -45,13 +42,12 @@ func (p *podRouter) getList(ctx context.Context, w http.ResponseWriter, r *http.
 	}
 
 	item := r.Form.Get("item")
-	auxiliary := httputils.BoolValue(r, "auxiliary")
 	pod := r.Form.Get("pod")
 	vm := r.Form.Get("vm")
 
-	glog.V(1).Infof("List type is %s, specified pod: [%s], specified vm: [%s], list auxiliary pod: %v", item, pod, vm, auxiliary)
+	glog.V(1).Infof("List type is %s, specified pod: [%s], specified vm: [%s]", item, pod, vm)
 
-	env, err := p.backend.CmdList(item, pod, vm, auxiliary)
+	env, err := p.backend.CmdList(item, pod, vm)
 	if err != nil {
 		return err
 	}
@@ -69,13 +65,9 @@ func (p *podRouter) postPodCreate(ctx context.Context, w http.ResponseWriter, r 
 	}
 
 	podArgs, _ := ioutil.ReadAll(r.Body)
-	autoRemove := false
-	if r.Form.Get("remove") == "yes" || r.Form.Get("remove") == "true" {
-		autoRemove = true
-	}
-	glog.V(1).Infof("Args string is %s, autoremove %v", string(podArgs), autoRemove)
+	glog.V(1).Infof("Args string is %s", string(podArgs))
 
-	env, err := p.backend.CmdCreatePod(string(podArgs), autoRemove)
+	env, err := p.backend.CmdCreatePod(string(podArgs))
 	if err != nil {
 		return err
 	}
@@ -113,40 +105,11 @@ func (p *podRouter) postPodStart(ctx context.Context, w http.ResponseWriter, r *
 		return err
 	}
 
-	attach := false
 	podId := r.Form.Get("podId")
-	vmId := r.Form.Get("vmId")
-	if val := r.Form.Get("attach"); val == "yes" || val == "true" || val == "on" {
-		attach = true
-	}
 
-	var (
-		inStream  io.ReadCloser  = nil
-		outStream io.WriteCloser = nil
-	)
-
-	if attach {
-		// Setting up the streaming http interface.
-		in, out, err := httputils.HijackConnection(w)
-		if err != nil {
-			return err
-		}
-
-		inStream = in
-		outStream = out.(io.WriteCloser)
-		defer httputils.CloseStreams(inStream, outStream)
-
-		fmt.Fprintf(outStream, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
-	}
-
-	env, err := p.backend.CmdStartPod(inStream, outStream, podId, vmId, attach)
+	env, err := p.backend.CmdStartPod(podId)
 	if err != nil {
 		return err
-	}
-
-	if attach {
-		w.WriteHeader(http.StatusNoContent)
-		return nil
 	}
 
 	return env.WriteJSON(w, http.StatusOK)
@@ -221,41 +184,6 @@ func (p *podRouter) postPodUnpause(ctx context.Context, w http.ResponseWriter, r
 	return nil
 }
 
-func (p *podRouter) postVmCreate(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
-	if err := httputils.ParseForm(r); err != nil {
-		return err
-	}
-
-	var (
-		cpu   = 1
-		mem   = 128
-		async = false
-		err   error
-	)
-	if value := r.Form.Get("cpu"); value != "" {
-		cpu, err = strconv.Atoi(value)
-		if err != nil {
-			return err
-		}
-	}
-	if value := r.Form.Get("mem"); value != "" {
-		mem, err = strconv.Atoi(value)
-		if err != nil {
-			return err
-		}
-	}
-	if r.Form.Get("async") == "yes" || r.Form.Get("async") == "true" {
-		async = true
-	}
-
-	env, err := p.backend.CmdCreateVm(cpu, mem, async)
-	if err != nil {
-		return err
-	}
-
-	return env.WriteJSON(w, http.StatusOK)
-}
-
 func (p *podRouter) deletePod(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
@@ -270,16 +198,35 @@ func (p *podRouter) deletePod(ctx context.Context, w http.ResponseWriter, r *htt
 	return env.WriteJSON(w, http.StatusOK)
 }
 
-func (p *podRouter) deleteVm(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
-	if err := httputils.ParseForm(r); err != nil {
-		return err
-	}
-
-	vmId := r.Form.Get("vm")
-	env, err := p.backend.CmdKillVm(vmId)
+// port mappings
+func (p *podRouter) getPortMappings(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	env, err := p.backend.CmdListPortMappings(vars["id"])
 	if err != nil {
 		return err
 	}
 
 	return env.WriteJSON(w, http.StatusOK)
+}
+
+func (p *podRouter) putPortMappings(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	pms, _ := ioutil.ReadAll(r.Body)
+	switch vars["action"] {
+	case "add":
+		_, err := p.backend.CmdAddPortMappings(vars["id"], pms)
+		if err != nil {
+			return err
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case "delete":
+		_, err := p.backend.CmdDeletePortMappings(vars["id"], pms)
+		if err != nil {
+			return err
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Only add or delete operation are permitted"))
+		return nil
+	}
+	return nil
 }

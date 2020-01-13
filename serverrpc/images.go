@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/ioutil"
 
+	"fmt"
 	enginetypes "github.com/docker/engine-api/types"
 	"github.com/golang/glog"
 	"github.com/hyperhq/hyperd/types"
@@ -13,11 +14,8 @@ import (
 
 // ImageList implements GET /images/get
 func (s *ServerRPC) ImageList(ctx context.Context, req *types.ImageListRequest) (*types.ImageListResponse, error) {
-	glog.V(3).Infof("ImageList with request %s", req.String())
-
 	images, err := s.daemon.Daemon.Images(req.FilterArgs, req.Filter, req.All)
 	if err != nil {
-		glog.Errorf("ImageList error: %v", err)
 		return nil, err
 	}
 
@@ -41,8 +39,6 @@ func (s *ServerRPC) ImageList(ctx context.Context, req *types.ImageListRequest) 
 
 // ImagePull pulls a image from registry
 func (s *ServerRPC) ImagePull(req *types.ImagePullRequest, stream types.PublicAPI_ImagePullServer) error {
-	glog.V(3).Infof("ImagePull with request %s", req.String())
-
 	authConfig := &enginetypes.AuthConfig{}
 	if req.Auth != nil {
 		authConfig = &enginetypes.AuthConfig{
@@ -54,6 +50,7 @@ func (s *ServerRPC) ImagePull(req *types.ImagePullRequest, stream types.PublicAP
 			RegistryToken: req.Auth.Registrytoken,
 		}
 	}
+	glog.V(3).Infof("ImagePull with ServerStream %s request %s", stream, req.String())
 
 	r, w := io.Pipe()
 
@@ -79,7 +76,7 @@ func (s *ServerRPC) ImagePull(req *types.ImagePullRequest, stream types.PublicAP
 			}
 
 			if err := stream.Send(&types.ImagePullResponse{Data: data[:n]}); err != nil {
-				glog.Errorf("Send image pull  progress to stream error: %v", err)
+				glog.Errorf("Send image pull progress to stream error: %v", err)
 				return
 			}
 		}
@@ -88,13 +85,14 @@ func (s *ServerRPC) ImagePull(req *types.ImagePullRequest, stream types.PublicAP
 	pullResult = s.daemon.CmdImagePull(req.Image, req.Tag, authConfig, nil, w)
 	complete = true
 
+	if pullResult != nil {
+		pullResult = fmt.Errorf("s.daemon.CmdImagePull with request %s error: %v", req.String(), pullResult)
+	}
 	return pullResult
 }
 
 // ImagePush pushes a local image to registry
 func (s *ServerRPC) ImagePush(req *types.ImagePushRequest, stream types.PublicAPI_ImagePushServer) error {
-	glog.V(3).Infof("ImagePush with request %s", req.String())
-
 	authConfig := &enginetypes.AuthConfig{}
 	if req.Auth != nil {
 		authConfig = &enginetypes.AuthConfig{
@@ -106,6 +104,7 @@ func (s *ServerRPC) ImagePush(req *types.ImagePushRequest, stream types.PublicAP
 			RegistryToken: req.Auth.Registrytoken,
 		}
 	}
+	glog.V(3).Infof("ImagePush with ServerStream %s request %s", stream, req.String())
 
 	buffer := bytes.NewBuffer([]byte{})
 	var pushResult error
@@ -126,25 +125,24 @@ func (s *ServerRPC) ImagePush(req *types.ImagePushRequest, stream types.PublicAP
 		}
 
 		if err != nil {
-			glog.Errorf("Read image push stream error: %v", err)
-			return err
+			return fmt.Errorf("ImagePush read image push stream with request %s error: %v", req.String(), err)
 		}
 
 		if err := stream.Send(&types.ImagePushResponse{Data: data}); err != nil {
-			return err
+			return fmt.Errorf("stream.Send with request %s error: %v", req.String(), err)
 		}
 	}
 
+	if pushResult != nil {
+		pushResult = fmt.Errorf("s.daemon.CmdImagePush with request %s error: %v", req.String(), pushResult)
+	}
 	return pushResult
 }
 
 // ImageRemove deletes a image from hyperd
 func (s *ServerRPC) ImageRemove(ctx context.Context, req *types.ImageRemoveRequest) (*types.ImageRemoveResponse, error) {
-	glog.V(3).Infof("ImageDelete with request %s", req.String())
-
 	resp, err := s.daemon.CmdImageDelete(req.Image, req.Force, req.Prune)
 	if err != nil {
-		glog.Errorf("DeleteImage failed: %v", err)
 		return nil, err
 	}
 

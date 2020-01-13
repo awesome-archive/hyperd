@@ -1,17 +1,23 @@
 package daemon
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 
+	"github.com/hyperhq/hyperd/daemon/buffer"
 	"github.com/hyperhq/hyperd/daemon/daemondb"
+	"github.com/hyperhq/hyperd/daemon/pod"
+	"github.com/hyperhq/hyperd/networking/portmapping"
+	apitypes "github.com/hyperhq/hyperd/types"
+	"github.com/hyperhq/hyperd/utils"
+	"github.com/hyperhq/runv/driverloader"
+	"github.com/hyperhq/runv/factory"
+	"github.com/hyperhq/runv/hypervisor"
+	"github.com/hyperhq/runv/hypervisor/network"
 
-	"github.com/Unknwon/goconfig"
 	docker "github.com/docker/docker/daemon"
 	"github.com/docker/docker/daemon/logger/jsonfilelog"
 	"github.com/docker/docker/opts"
@@ -19,50 +25,41 @@ import (
 	"github.com/docker/docker/registry"
 	dockerutils "github.com/docker/docker/utils"
 	"github.com/golang/glog"
-	apitypes "github.com/hyperhq/hyperd/types"
-	"github.com/hyperhq/hyperd/utils"
-	"github.com/hyperhq/runv/factory"
-	"github.com/hyperhq/runv/hypervisor"
-	"github.com/hyperhq/runv/hypervisor/pod"
-	"github.com/hyperhq/runv/hypervisor/types"
+	"github.com/vishvananda/netlink"
 )
 
 var (
 	DefaultLogPrefix string = "/var/run/hyper/Pods"
 )
 
-type GlobalLogConfig struct {
-	*pod.PodLogConfig
-	PathPrefix  string
-	PodIdInPath bool
-}
-
 type Daemon struct {
 	*docker.Daemon
-	ID          string
-	db          *daemondb.DaemonDB
-	PodList     *PodList
-	VmList      *VmList
-	Factory     factory.Factory
-	Kernel      string
-	Initrd      string
-	Bios        string
-	Cbfs        string
-	VboxImage   string
-	BridgeIface string
-	BridgeIP    string
-	Host        string
-	Storage     Storage
-	Hypervisor  string
-	DefaultLog  *GlobalLogConfig
+	ID         string
+	db         *daemondb.DaemonDB
+	PodList    *pod.PodList
+	Factory    factory.Factory
+	Host       string
+	Storage    Storage
+	Hypervisor string
+	DefaultLog *pod.GlobalLogConfig
+
+	buffer *buffer.Buffer
 }
 
 func (daemon *Daemon) Restore() error {
+	//try to migrate lagecy data first
+	err := pod.MigrateLagecyPersistentData(daemon.db, func() *pod.PodFactory {
+		return pod.NewPodFactory(daemon.Factory, daemon.PodList, daemon.db, daemon.Storage, daemon.Daemon, daemon.DefaultLog)
+	})
+	if err != nil {
+		return err
+	}
+
 	if daemon.GetPodNum() == 0 {
 		return nil
 	}
 
-	ch := daemon.db.GetAllPods()
+	ch := pod.LoadAllPods(daemon.db)
 	if ch == nil {
 		estr := "Cannot list pods in leveldb"
 		glog.Error(estr)
@@ -70,85 +67,34 @@ func (daemon *Daemon) Restore() error {
 	}
 
 	for {
-		item, ok := <-ch
+		layout, ok := <-ch
 		if !ok {
 			break
 		}
-		if item == nil {
+		if layout == nil {
 			estr := "error during load pods from leveldb"
 			glog.Error(estr)
 			return errors.New(estr)
 		}
 
-		podId := string(item.K[4:])
+		glog.V(1).Infof("reloading pod %s: %#v", layout.Id, layout)
+		fc := pod.NewPodFactory(daemon.Factory, daemon.PodList, daemon.db, daemon.Storage, daemon.Daemon, daemon.DefaultLog)
 
-		glog.V(1).Infof("reloading pod %s with args %s", podId, string(item.V))
-
-		daemon.db.DeletePod(podId)
-
-		var podSpec apitypes.UserPod
-		err := json.Unmarshal(item.V, &podSpec)
+		p, err := pod.LoadXPod(fc, layout)
 		if err != nil {
-			return err
-		}
-
-		p, err := daemon.createPodInternal(podId, &podSpec, true)
-		if err != nil {
-			glog.Warningf("Got a unexpected error when creating(load) pod %s, %v", podId, err)
+			glog.Warningf("Got a unexpected error when creating(load) pod %s, %v", layout.Id, err)
 			continue
 		}
 
-		if err = daemon.AddPod(p, string(item.V)); err != nil {
-			//TODO: remove the created
-			glog.Warningf("Got a error duriong insert pod %s, %v", p.Id, err)
-			continue
+		if glog.V(3) {
+			p.Log(pod.TRACE, "containers in pod %s: %v", p.Id(), p.ContainerIds())
 		}
-
-		vmId, err := daemon.db.GetP2V(podId)
-		if err != nil {
-			glog.V(1).Infof("no existing VM for pod %s: %v", podId, err)
-			continue
-		}
-		if err := p.AssociateVm(daemon, string(vmId)); err != nil {
-			glog.V(1).Infof("Some problem during associate vm %s to pod %s, %v", string(vmId), podId, err)
-			// continue to next
-		}
-	}
-
-	if glog.V(3) {
-		glog.Infof("%d pod have been loaded", daemon.PodList.CountAll())
-		daemon.PodList.Foreach(func(p *Pod) error {
-			glog.Infof("container in pod %s status: %v", p.Id, p.Status().Containers)
-			glog.Infof("container in pod %s spec: %v", p.Id, p.Spec.Containers)
-			return nil
-		})
 	}
 
 	return nil
 }
 
-func NewDaemon(cfg *goconfig.ConfigFile) (*Daemon, error) {
-	daemon, err := NewDaemonFromDirectory(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return daemon, nil
-}
-
-func NewDaemonFromDirectory(cfg *goconfig.ConfigFile) (*Daemon, error) {
-	kernel, _ := cfg.GetValue(goconfig.DEFAULT_SECTION, "Kernel")
-	initrd, _ := cfg.GetValue(goconfig.DEFAULT_SECTION, "Initrd")
-	glog.V(0).Infof("The config: kernel=%s, initrd=%s", kernel, initrd)
-	vboxImage, _ := cfg.GetValue(goconfig.DEFAULT_SECTION, "Vbox")
-	glog.V(0).Infof("The config: vbox image=%s", vboxImage)
-	biface, _ := cfg.GetValue(goconfig.DEFAULT_SECTION, "Bridge")
-	bridgeip, _ := cfg.GetValue(goconfig.DEFAULT_SECTION, "BridgeIP")
-	glog.V(0).Infof("The config: bridge=%s, ip=%s", biface, bridgeip)
-	bios, _ := cfg.GetValue(goconfig.DEFAULT_SECTION, "Bios")
-	cbfs, _ := cfg.GetValue(goconfig.DEFAULT_SECTION, "Cbfs")
-	glog.V(0).Infof("The config: bios=%s, cbfs=%s", bios, cbfs)
-	host, _ := cfg.GetValue(goconfig.DEFAULT_SECTION, "Host")
-
+func NewDaemon(cfg *apitypes.HyperConfig) (*Daemon, error) {
 	var tempdir = path.Join(utils.HYPER_ROOT, "run")
 	os.Setenv("TMPDIR", tempdir)
 	if err := os.MkdirAll(tempdir, 0755); err != nil && !os.IsExist(err) {
@@ -170,18 +116,11 @@ func NewDaemonFromDirectory(cfg *goconfig.ConfigFile) (*Daemon, error) {
 	}
 
 	daemon := &Daemon{
-		ID:          fmt.Sprintf("%d", os.Getpid()),
-		db:          db,
-		Kernel:      kernel,
-		Initrd:      initrd,
-		Bios:        bios,
-		Cbfs:        cbfs,
-		VboxImage:   vboxImage,
-		PodList:     NewPodList(),
-		VmList:      NewVmList(),
-		Host:        host,
-		BridgeIP:    bridgeip,
-		BridgeIface: biface,
+		ID:      fmt.Sprintf("%d", os.Getpid()),
+		db:      db,
+		PodList: pod.NewPodList(),
+		Host:    cfg.Host,
+		buffer:  buffer.NewBuffer(cfg),
 	}
 
 	daemon.Daemon, err = docker.NewDaemon(dockerCfg, registryCfg)
@@ -194,12 +133,24 @@ func NewDaemonFromDirectory(cfg *goconfig.ConfigFile) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	stor, err := StorageFactory(sysinfo)
+	stor, err := StorageFactory(sysinfo, daemon.db)
 	if err != nil {
 		return nil, err
 	}
 	daemon.Storage = stor
-	daemon.Storage.Init()
+	daemon.Storage.Init(cfg)
+
+	err = daemon.initRunV(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	err = daemon.initNetworks(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	daemon.initDefaultLog(cfg)
 
 	return daemon, nil
 }
@@ -212,7 +163,7 @@ var (
 func presentInHelp(usage string) string { return usage }
 func absentFromHelp(string) string      { return "" }
 
-func InitDockerCfg(mirrors []string, insecureRegistries []string, graphdriver, root string) {
+func InitDockerCfg(mirrors []string, insecureRegistries []string, graphdriver, basesize, root string) {
 	if dockerCfg.LogConfig.Config == nil {
 		dockerCfg.LogConfig.Config = make(map[string]string)
 	}
@@ -225,6 +176,13 @@ func InitDockerCfg(mirrors []string, insecureRegistries []string, graphdriver, r
 	dockerCfg.GraphDriver = graphdriver
 	dockerCfg.Root = root
 	dockerCfg.TrustKeyPath = path.Join(root, "keys")
+	if basesize != "" {
+		if graphdriver == "devicemapper" {
+			dockerCfg.GraphOptions = append(dockerCfg.GraphOptions, fmt.Sprintf("dm.basesize=%s", basesize))
+		} else if graphdriver == "rawblock" {
+			dockerCfg.GraphOptions = append(dockerCfg.GraphOptions, fmt.Sprintf("rawblock.basesize=%s", basesize))
+		}
+	}
 
 	// disable docker network
 	flags.Set("-bridge", "none")
@@ -256,7 +214,62 @@ func InitDockerCfg(mirrors []string, insecureRegistries []string, graphdriver, r
 	registryCfg = registry.NewService(registryOpts)
 }
 
-func (daemon *Daemon) DefaultLogCfg(driver string, cfg map[string]string) {
+func (daemon *Daemon) initRunV(c *apitypes.HyperConfig) error {
+	var (
+		err error
+	)
+
+	if hypervisor.HDriver, err = driverloader.Probe(c.Driver); err != nil {
+		glog.Warningf("%s", err.Error())
+		glog.Errorf("Please specify the correct and available hypervisor, such as 'kvm', 'qemu-kvm',  'libvirt', 'xen', 'qemu', or ''")
+		return err
+	}
+
+	daemon.Hypervisor = c.Driver
+	glog.Infof("The hypervisor's driver is %s", c.Driver)
+	bootConfig := hypervisor.BootConfig{
+		Kernel:      c.Kernel,
+		Initrd:      c.Initrd,
+		EnableVsock: c.EnableVsock,
+		GDBTCPPort:  c.GDBTCPPort,
+	}
+	daemon.Factory = factory.NewFromPolicy(bootConfig, c.VmFactoryPolicy)
+
+	return nil
+}
+
+func (daemon *Daemon) initNetworks(c *apitypes.HyperConfig) error {
+	if err := hypervisor.InitNetwork(c.Bridge, c.BridgeIP, true); err != nil {
+		glog.Errorf("InitNetwork failed, %s", err.Error())
+		return err
+	}
+	brlink, err := netlink.LinkByName(network.BridgeIface)
+	if err != nil {
+		glog.Errorf("failed to get link of the configured bridge (%s): %v", network.BridgeIface, err)
+		return err
+	}
+	addrs, err := netlink.AddrList(brlink, netlink.FAMILY_V4)
+	if err != nil {
+		glog.Errorf("failed to get ip address of the configured bridge (%s): %v", network.BridgeIface, err)
+		return err
+	}
+	if len(addrs) == 0 {
+		err = fmt.Errorf("configured bridge (%s) has no IPv4 addresses")
+		glog.Error(err)
+		return err
+	}
+	if err := portmapping.Setup(network.BridgeIface, fmt.Sprintf("%s", addrs[0].IPNet), c.DisableIptables); err != nil {
+		glog.Errorf("Setup portmapping failed: %v", err)
+	}
+	return nil
+}
+
+func (daemon *Daemon) initDefaultLog(c *apitypes.HyperConfig) {
+	var (
+		driver = c.DefaultLog
+		cfg    = c.DefaultLogOpt
+	)
+
 	if driver == "" {
 		driver = jsonfilelog.Name
 	}
@@ -281,8 +294,8 @@ func (daemon *Daemon) DefaultLogCfg(driver string, cfg map[string]string) {
 		}
 	}
 
-	daemon.DefaultLog = &GlobalLogConfig{
-		PodLogConfig: &pod.PodLogConfig{
+	daemon.DefaultLog = &pod.GlobalLogConfig{
+		PodLogConfig: &apitypes.PodLogConfig{
 			Type:   driver,
 			Config: cfg,
 		},
@@ -292,31 +305,12 @@ func (daemon *Daemon) DefaultLogCfg(driver string, cfg map[string]string) {
 }
 
 func (daemon *Daemon) GetPodNum() int64 {
-	pods, err := daemon.db.ListPod()
+	pods, err := pod.ListAllPods(daemon.db)
 	if err != nil {
+		glog.Errorf("fail to list pods: %v", err)
 		return 0
 	}
 	return int64(len(pods))
-}
-
-func (daemon *Daemon) GetRunningPodNum() int64 {
-	return daemon.PodList.CountRunning()
-}
-
-func (daemon *Daemon) GetVolumeId(podId, volName string) (int, error) {
-	vols, err := daemon.db.ListPodVolumes(podId)
-	if err != nil {
-		return -1, err
-	}
-
-	dev_id := 0
-	for _, vol := range vols {
-		fields := strings.Split(string(vol), ":")
-		if fields[0] == volName {
-			dev_id, _ = strconv.Atoi(fields[1])
-		}
-	}
-	return dev_id, nil
 }
 
 func (daemon *Daemon) DeleteVolumeId(podId string) error {
@@ -337,97 +331,61 @@ func (daemon *Daemon) WritePodAndContainers(podId string) error {
 	}
 
 	containers := []string{}
-	for _, c := range p.PodStatus.Containers {
-		containers = append(containers, c.Id)
+	for _, c := range p.ContainerIds() {
+		containers = append(containers, c)
 	}
 
-	return daemon.db.UpdateP2C(podId, containers)
+	return daemon.db.LagecyUpdateP2C(podId, containers)
 }
 
 func (daemon *Daemon) GetVmByPodId(podId string) (string, error) {
-	pod, ok := daemon.PodList.Get(podId)
+	p, ok := daemon.PodList.Get(podId)
 	if !ok {
 		return "", fmt.Errorf("Not found Pod %s", podId)
 	}
-	return pod.PodStatus.Vm, nil
+	return p.SandboxName(), nil
 }
 
-func (daemon *Daemon) GetPodByContainer(containerId string) (string, error) {
-	if pod, ok := daemon.PodList.GetByContainerId(containerId); ok {
-		return pod.Id, nil
+func (daemon *Daemon) GetPodByContainerIdOrName(name string) (*pod.XPod, error) {
+	if p, _, ok := daemon.PodList.GetByContainerIdOrName(name); ok {
+		return p, nil
 	} else {
-		return "", fmt.Errorf("Can not find that container!")
+		return nil, fmt.Errorf("cannot find container %s", name)
 	}
-}
-
-func (daemon *Daemon) GetPodByContainerIdOrName(name string) (pod *Pod, idx int, err error) {
-	if pod, idx, ok := daemon.PodList.GetByContainerIdOrName(name); ok {
-		return pod, idx, nil
-	} else {
-		return nil, -1, fmt.Errorf("cannot find container %s", name)
-	}
-}
-
-func (daemon *Daemon) AddPod(pod *Pod, podArgs string) (err error) {
-	// store the UserPod into the db
-	if err = daemon.db.UpdatePod(pod.Id, []byte(podArgs)); err != nil {
-		glog.V(1).Info("Found an error while saving the POD file")
-		return
-	}
-	defer func() {
-		if err != nil {
-			daemon.db.DeletePod(pod.Id)
-		}
-	}()
-
-	daemon.PodList.Put(pod)
-	defer func() {
-		if err != nil {
-			daemon.PodList.Delete(pod.Id)
-		}
-	}()
-
-	if err = daemon.WritePodAndContainers(pod.Id); err != nil {
-		glog.V(1).Info("Found an error while saving the Containers info")
-		return
-	}
-
-	return nil
-}
-
-func (daemon *Daemon) RemovePod(podId string) {
-	daemon.PodList.Delete(podId)
-}
-
-func (daemon *Daemon) AddVm(vm *hypervisor.Vm) {
-	daemon.VmList.Add(vm)
-}
-
-func (daemon *Daemon) RemoveVm(vmId string) {
-	daemon.VmList.Remove(vmId)
 }
 
 func (daemon *Daemon) DestroyAllVm() error {
-	var remains = []*Pod{}
-	daemon.PodList.Foreach(func(p *Pod) error {
+	var remains = []*pod.XPod{}
+	daemon.PodList.Foreach(func(p *pod.XPod) error {
 		remains = append(remains, p)
 		return nil
 	})
 	for _, p := range remains {
-		if _, _, err := daemon.StopPodWithinLock(p); err != nil {
-			glog.V(1).Infof("fail to stop %s: %v", p.Id, err)
+		if err := p.Stop(5); err != nil {
+			glog.V(1).Infof("fail to stop %s: %v", p.Id(), err)
 		}
 	}
 	return nil
 }
 
 func (daemon *Daemon) DestroyAndKeepVm() error {
-	for i := 0; i < 3; i++ {
-		code, err := daemon.ReleaseAllVms()
-		if err != nil && code == types.E_BUSY {
-			continue
-		} else {
-			return err
+	err := daemon.ReleaseAllVms()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (daemon *Daemon) ReleaseAllVms() error {
+	var remains = []*pod.XPod{}
+	daemon.PodList.Foreach(func(p *pod.XPod) error {
+		remains = append(remains, p)
+		return nil
+	})
+	for _, p := range remains {
+		glog.V(1).Infof("try to dissociate %s", p.Id())
+		if err := p.Dissociate(); err != nil {
+			glog.Warningf("fail to dissociate %s: %v", p.Id(), err)
 		}
 	}
 	return nil
@@ -437,13 +395,7 @@ func (daemon *Daemon) Shutdown() error {
 	glog.V(0).Info("The daemon will be shutdown")
 	glog.V(0).Info("Shutdown all VMs")
 
-	daemon.VmList.Foreach(func(vm *hypervisor.Vm) error {
-		if _, _, err := vm.Kill(); err == nil {
-			delete(daemon.VmList.vms, vm.Id)
-		}
-		return nil
-	})
-
+	daemon.Factory.CloseFactory()
 	daemon.db.Close()
 	glog.Flush()
 	return nil
